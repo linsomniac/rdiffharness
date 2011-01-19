@@ -1,0 +1,171 @@
+#!/bin/bash
+#
+#  Generic backup script, which is customized by the specific backup scripts
+#  for each system.  Written by Sean Reifschneider <jafo@tummy.com>
+#  Licensed under the GPL, version 2 or newer.
+
+function getlock {
+	#  remove lockfile if pid does not exist
+	if [ -e "$1" ]; then
+		OLDPID=`cat "$1"`
+		[ -z "`ps --no-headers --pid $OLDPID`" ] && rm -f "$1"
+	fi
+
+	#  pid exists
+	[ -e "$1" ] && return 1
+
+	#  create pid-file
+	echo "$$" >"${1}.$$"
+	mv "${1}.$$" "$1"
+
+	#  check pid file for our pid
+	[ "`cat $1`" != "$$" ] && return 1
+
+	trap "rm -f $1" EXIT
+	return 0
+}
+
+if [ "$#" -ne 1 ]; then
+	echo "usage: ${0##*/} <HOSTNAME>"
+	exit 1
+fi
+
+PATH=$PATH:/usr/sbin:/sbin
+HOSTNAME="$1"
+SSH_HOSTNAME="$1"
+BACKUP_ROOTDIR=/backups
+BACKUPDATE=`date '+%Y.%m.%d-%H:%M:%S'`
+DOM=`date +%d | sed 's/^0//'`
+DOW=`date +%w`
+BACKUP_HOST_DIR="${BACKUP_ROOTDIR}/${HOSTNAME}"
+
+#  get type name
+TYPENAME=daily
+#[ "$DOW" -eq 1 ] && TYPENAME=weekly
+[ "$DOM" -eq 1 ] && TYPENAME=monthly
+
+#  about once a month, run a full verification
+[ "$RANDOM" -lt 1077 ] && CHECKSUM="--ignore-times" || CHECKSUM=
+
+#  defaults
+PINGHOST=
+PINGTRYMINUTES=
+INPLACEARG=--inplace
+PARTIALARG=--partial
+COMPRESSARG=
+BWLIMITARG=
+REMOVE_DAILY=15D
+REMOVE_MONTHLY=1Y
+
+#  source config
+[ -f "$BACKUP_HOST_DIR"/config ] && . "$BACKUP_HOST_DIR"/config
+
+#  checking and setup
+if [ ! -d "$BACKUP_HOST_DIR"/current ]; then
+	mkdir "$BACKUP_HOST_DIR"/current
+	if [ "$?" -ne 0 ]; then
+		echo ERROR: Unable to create $BACKUP_HOST_DIR/current
+		exit 1
+	fi
+	chmod 700 "$BACKUP_HOST_DIR"/current
+fi
+if [ ! -e "$BACKUP_HOST_DIR/backup-identity" ]; then
+	echo "ERROR: No existing SSH key, generating one..."
+	ssh-keygen -t rsa -f "$BACKUP_HOST_DIR"/backup-identity -N ''
+	echo 'no-pty,no-agent-forwarding,no-X11-forwarding,no-port-forwarding,command="rsync --server --sender -vlogDtpre.i'" $COMPRESSARG $BWLIMITARG "'--ignore-errors --numeric-ids --inplace . /"' `cat "$BACKUP_HOST_DIR"/backup-identity.pub`
+	echo
+	echo "NOTE: You need to install this key on the destination system!"
+	exit 1
+fi
+[ ! -f "$BACKUP_HOST_DIR"/exclude ] && : >"$BACKUP_HOST_DIR"/exclude
+
+exec >/var/tmp/rsync-"$HOSTNAME"-`date +'%Y-%m-%d'`.out 2>&1
+
+#  only one at a time
+if ! getlock "$BACKUP_HOST_DIR"/lockfile; then
+	echo "Unable to get lockfile."
+	exit 1
+fi
+
+#  ping the host
+if [ ! -z "$PINGHOST" ]; then
+	echo "Pinging host $PINGHOST for up to $PINGTRYMINUTES minutes..."
+	echo =============================================================
+	while [ "$PINGTRYMINUTES" -gt 0 ]; do
+		PINGTRYMINUTES=$[PINGTRYMINUTES-1]
+		fping -q -r 10 -c 10 "$PINGHOST" >/dev/null 2>&1
+		if [ "$?" -eq 0 ]; then
+			echo "Pinging succeeded."
+			echo
+			break
+		fi
+		sleep 50
+	done
+	if [ "$PINGTRYMINUTES" -lt 1 ]; then
+		echo "Unable to ping host $PINGHOST"
+		exit 1
+	fi
+fi
+
+#  run backup
+if [ ! -z "$CHECKSUM" ]
+then
+	echo "*** DOING FULL CHECKSUM RUN ***"
+fi
+echo "Starting rsync of $HOSTNAME" `date`
+echo =============================================================
+SSH_CMD="ssh -i $BACKUP_HOST_DIR/backup-identity"
+RSYNC_START_TIME=`date +%s`
+rsync -e "$SSH_CMD" --delete --delete-excluded \
+		$CHECKSUM \
+		$BWLIMITARG \
+		$INPLACEARG \
+		$COMPRESSARG \
+		$PARTIALARG \
+		--exclude '/proc/' --exclude '/sys/' --exclude='/dev/' \
+		--exclude='/home/*/.gvfs/' \
+		--exclude '/var/named/chroot/proc/' \
+		--exclude-from="$BACKUP_HOST_DIR"/exclude \
+		--filter="dir-merge .tummy-backup-filter" \
+		--ignore-errors \
+		--numeric-ids -av root@${SSH_HOSTNAME}:/ "${BACKUP_HOST_DIR}/current/"
+RSYNC_RET="$?"
+RSYNC_END_TIME=`date +%s`
+echo "Rsync elapsed time: $[RSYNC_END_TIME-RSYNC_START_TIME]"
+echo "Rsync return-code: $RSYNC_RET"
+
+#  check for ok exit codes
+if [ "$RSYNC_RET" -ne 0 -a "$RSYNC_RET" -ne 24 -a "$RSYNC_RET" -ne 23 ]; then
+	echo "Rsync failed, aborting."
+	exit 1
+fi
+
+#  make snapshot
+echo
+echo "Starting rdiff copy" `date`
+echo =============================================================
+RDIFF_DEST_DIR="${BACKUP_HOST_DIR}/rdiffs/${TYPENAME}"
+[ ! -d "$RDIFF_DEST_DIR" ] && echo "Making new rdiff dir" \
+	&& mkdir -p "$RDIFF_DEST_DIR"
+RDIFF_START_TIME=`date +%s`
+rdiff-backup --print-statistics --preserve-numerical-ids \
+		"${BACKUP_HOST_DIR}/current/" "$RDIFF_DEST_DIR"
+RDIFF_END_TIME=`date +%s`
+echo "rdiff-backup elapsed time: $[RDIFF_END_TIME-RDIFF_START_TIME]"
+
+#  clean up
+echo
+AGE="$REMOVE_MONTHLY"
+[ "$TYPENAME" = daily ] && AGE="$REMOVE_DAILY"
+echo "Removing historic backups older than $AGE from $TYPENAME" `date`
+echo =============================================================
+RDIFF_START_TIME=`date +%s`
+rdiff-backup --force --remove-older-than "$AGE" "$RDIFF_DEST_DIR"
+RDIFF_END_TIME=`date +%s`
+echo "cleanup elapsed time: $[RDIFF_END_TIME-RDIFF_START_TIME]"
+
+#  final stats
+echo
+echo ==========================
+echo "Done at" `date`
+echo "Total elapsed time: $[RDIFF_END_TIME-RSYNC_START_TIME]"
