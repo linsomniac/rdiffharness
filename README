@@ -21,3 +21,89 @@ this mechanism overcomes all the issues I've run into with rdiff-backup in
 the past.  *BUT*, you do have to keep 3 copies of all system backups
 (current, daily snapshots, monthly snapshots).  Unfortunately, you can't
 hardlink these either, because rdiffbackup will break the links.
+
+INSTALLATION
+============
+
+   Create a /backups directory.  The scripts assume this is the location,
+   but you can change it by modifying rdiff-harness.
+
+   Install rdiff-backup and rsync on the server.
+
+   Install rsync on the clients.
+
+USAGE
+=====
+
+   You run the harness from cron, like this:
+
+      0 1 * * * /usr/local/sbin/rdiffharness guin.example.com
+
+   This relies on a /backups/guin.example.com directory existing.  In that
+   directory is:
+
+      config:
+
+         PINGHOST=10.55.3.6
+         PINGTRYMINUTES=600
+         COMPRESSARG=-z
+         BWLIMITARG=--bwlimit=60
+
+      exclude:
+
+         <See "examples/config" for an example>
+
+      backup-identity
+      backup-identity.pub
+
+         Created by doing "ssh-keygen -t rsa -N '' -f backup-identity".
+         Then you need to prefix the "backup-identity.pub" line with the
+         "examples/identity-command" data.  This needs to then be a single
+         really long line, and put in the client system's
+         "/root/.ssh/authorized_keys" file.
+
+      mkdir current
+
+      mkdir rdiffs
+
+   Ensure that from the server you can "ssh -i
+   /backups/guin.example.com/backup-identity root@guin.example.com".
+   It will probably ask you to verify the host key when you first run it.
+   If this command fails out with an SSH error, you have a SSH connection
+   problem.  Otherwise, it should just "hang" and if you press ENTER
+   four times it should generate an rsync protocol error.  For example,
+   this is a successful test:
+
+      [root@backup guin.example.com]# ssh -i /backups/guin.example.com/backup-identity root@guin.example.com
+      protocol version mismatch -- is your shell clean?
+      (see the rsync man page for an explanation)
+      rsync error: protocol incompatibility (code 2) at compat.c(173) [sender=3.0.7]
+      Connection to 10.55.3.6 closed.
+
+   Now run the command from the cron job:
+
+      /usr/local/sbin/rdiffharness guin.example.com
+
+   Your backup should start running.
+
+LOGS
+====
+
+   The logs are written to "/var/tmp/rsync-CLIENTNAME-DATE.out".  Look at
+   these files, particularly at the bottom, for information about the
+   status of the backup.
+
+RECOVERIES
+==========
+
+   Recoveries of the most recent backup just involve getting files out of
+   /backups/CLIENTNAME/current
+
+   For more historic backups, you need to use an rdiff-backup command, such
+   as:
+
+      rdiff-backup -r 1B rdiffs/monthly/home/username/.zsh_history /tmp
+
+   Where "1B" means "the previous backup snapshot".  This could also be a
+   date or date/time.  See "man rdiff" for more information.  For daily
+   backups it would be under "rdiffs/daily" instead of "rdiffs/monthly".
