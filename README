@@ -1,0 +1,23 @@
+rdiffharness README
+Sean Reifschneider <jafo@tummy.com>
+Licensed under the GPL, version 2 or newer
+==========================================
+
+Backup system that uses rdiff to store history.  The backup server connects
+to the clients, so SSH keys are stored on the server.  It can ping the
+clients and retry for a specified number of hours, waiting for the client
+to become available.
+
+The benefit is that it is just a single, fairly simple but robust, script.
+It uses rsync to talk to the client, and then rdiff-backup to do the
+historic deltas.
+
+One caveat: because of the way rdiff-backup responds to being disconnected
+in the middle of a backup, and because Fedora, CentOS, and Ubuntu provide
+different, incompatible versions of rdiffbackup, this stores multiple
+copies of your backup data.  If you are space-constrained, or just can't
+live with this, don't look any further.  However, with cheap disc drives,
+this mechanism overcomes all the issues I've run into with rdiff-backup in
+the past.  *BUT*, you do have to keep 3 copies of all system backups
+(current, daily snapshots, monthly snapshots).  Unfortunately, you can't
+hardlink these either, because rdiffbackup will break the links.
